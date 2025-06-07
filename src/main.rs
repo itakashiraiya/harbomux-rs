@@ -1,5 +1,21 @@
-use std::process::Command;
-use std::{env, fmt};
+use once_cell::sync::Lazy;
+use std::process::{Command, ExitStatus};
+use std::{
+    env, fmt,
+    io::{Error, ErrorKind},
+};
+
+const HARB_VAR: &str = "HARBOMUX";
+const TMUX_VAR: &str = "TMUX";
+const HARB: Lazy<Tmux> = Lazy::new(|| Tmux::new().set_server("harbonizer").unwrap());
+const TMUX: Lazy<Tmux> = Lazy::new(|| Tmux::new());
+const BINARY: Lazy<String> = Lazy::new(|| {
+    env::current_exe()
+        .expect("???")
+        .to_str()
+        .expect("???")
+        .to_string()
+});
 
 enum Cmd {
     Harbour,
@@ -75,21 +91,42 @@ impl Os {
         Os::get_env(var).is_some()
     }
 
-    fn cmd(str: &str, args: &[&str]) -> String {
-        let mut child = Command::new(str);
+    fn cmd(args: &[&str]) -> Result<(), Error> {
+        let mut cmd = Command::new(args[0]);
 
-        for arg in args {
-            child.arg(arg);
+        for arg in &args[1..] {
+            cmd.arg(arg);
         }
 
-        let out = child.output().expect("Failed cmd");
+        cmd.output().map(|_| ())
+    }
 
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    fn cmd_ret(args: &[&str]) -> Result<String, Error> {
+        let mut cmd = Command::new(args[0]);
+
+        for arg in &args[1..] {
+            cmd.arg(arg);
+        }
+
+        let output = cmd.output()?;
+        if output.stderr.is_empty() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            let err_str = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(Error::new(ErrorKind::Other, err_str))
+        }
+    }
+
+    fn cmd_spawn(args: &[&str]) -> Result<ExitStatus, Error> {
+        let mut cmd = Command::new(args[0]);
+
+        for arg in &args[1..] {
+            cmd.arg(arg);
+        }
+
+        cmd.spawn()?.wait()
     }
 }
-
-const HARB_VAR: &str = "HARBOMUX";
-const TMUX_VAR: &str = "TMUX";
 
 struct Tmux {
     prefix: Option<String>,
@@ -113,38 +150,53 @@ impl Tmux {
 
     fn prefix(&self) -> String {
         match self.prefix {
-            Some(ref server) => String::from("-L ") + server,
+            Some(ref server) => String::from("-L ") + server + " ",
             None => "".to_string(),
         }
     }
 
-    fn cmd(&self, args: &[&str]) -> String {
-        let mut child = Command::new("sh");
-
-        let arg = args.join(" ");
-
-        let prefix = &self.prefix();
-
-        let arg = format!("tmux {} {}", prefix, arg);
-
-        println!("tmux arg: {}", arg);
-
-        child.arg("-c");
-        child.arg(arg);
-
-        let out = child.output().expect("Failed cmd");
-
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    #[allow(dead_code)]
+    fn cmd(&self, arg: &str) -> Result<(), std::io::Error> {
+        Os::cmd(&["sh", "-c", &(String::from("tmux ") + &self.prefix() + arg)])
     }
 
-    fn new_session(&self) -> String {
-        self.cmd(&["new-session", "-d"])
+    #[allow(dead_code)]
+    fn cmd_ret(&self, arg: &str) -> Result<String, Error> {
+        Os::cmd_ret(&["sh", "-c", &(String::from("tmux ") + &self.prefix() + arg)])
+    }
+
+    fn cmd_spawn(&self, arg: &str) -> Result<ExitStatus, Error> {
+        Os::cmd_spawn(&["sh", "-c", &(String::from("tmux ") + &self.prefix() + arg)])
+    }
+
+    fn is_on(&self) -> bool {
+        self.cmd_ret("has 2>&1").is_ok_and(|s| s == "")
+    }
+
+    #[allow(dead_code)]
+    fn detach_cmd(&self, arg: &str) -> Result<String, std::io::Error> {
+        self.cmd_ret(&(String::from("detach -E \"") + arg + "\""))
+    }
+
+    #[allow(dead_code)]
+    fn detach(&self) -> Result<String, std::io::Error> {
+        self.cmd_ret("detach")
+    }
+
+    #[allow(dead_code)]
+    fn new_sess_cmd(&self, arg: &str) -> Result<ExitStatus, std::io::Error> {
+        self.cmd_spawn(&("new-session ".to_string() + arg))
+    }
+
+    #[allow(dead_code)]
+    fn new_sess(&self) -> Result<String, std::io::Error> {
+        self.cmd_ret("new-session")
     }
 }
 
 #[allow(dead_code)]
 fn echo(str: &str) {
-    let ret = Os::cmd("echo", &[str]);
+    let ret = Os::cmd_ret(&["echo", str]).unwrap();
     print!("{}\n", ret)
 }
 
@@ -153,7 +205,10 @@ fn setup() {
         println!("Cant run setup here!");
         return;
     }
-    Os::set_env(HARB_VAR, "1");
+    let env_vars = HARB
+        .cmd_ret("show-env | sed \"/^-/d\" | sed \"s/^/export /\"")
+        .unwrap();
+    println!("env_vars:\n{}", env_vars);
     //run startup code
 }
 
@@ -161,44 +216,32 @@ fn hidden_funcs() {
     let a: Vec<String> = env::args().collect();
     match HiddenCmd::new(&a[2]) {
         Some(HiddenCmd::Setup) => setup(),
-        None => println!("No hidded func found!"),
+        None => println!("No hidden func found!"),
     }
 }
 
 fn launch() {
+    println!("TODO: launching...");
+    let _ = HARB.new_sess_cmd(
+        &("-e ".to_string() + &HARB_VAR + "=pre-setup \"" + &BINARY + " --hidden setup; bash\""),
+    );
     //launch tmux with env var HARBOMUX set to "pre-setup" with cmd to run binary with "--hidden
     //setup" args
 }
 
-// static TMUX: once_cell::sync::Lazy<Tmux> =
-//     once_cell::sync::Lazy::new(|| Tmux::new().set_server("harbonizer").unwrap());
-
-#[allow(non_snake_case)]
-fn TMUX() -> &'static Tmux {
-    use once_cell::sync::Lazy;
-    static TMUX: Lazy<Tmux> = Lazy::new(|| Tmux::new().set_server("harbonizer").unwrap());
-    &TMUX
+fn load() {
+    println!("TODO? load..")
 }
-
-#[allow(non_snake_case)]
-fn BINARY() -> &'static String {
-    use once_cell::sync::Lazy;
-    static BINARY: Lazy<String> = Lazy::new(|| {
-        env::current_exe()
-            .expect("???")
-            .to_str()
-            .expect("???")
-            .to_string()
-    });
-    &BINARY
-}
-
-fn load() {}
 
 fn harbour() {
-    println!("{}", BINARY());
-    if Os::has_env(TMUX_VAR) {
-        //detach with binary cmd "harbour"
+    if Os::has_env(HARB_VAR) {
+        println!("Already in harbomux!")
+    } else if Os::has_env(TMUX_VAR) {
+        println!("in tmux");
+        TMUX.detach_cmd(&("".to_string() + &BINARY + " harbour"))
+            .unwrap();
+    } else if HARB.is_on() {
+        HARB.cmd_spawn("attach").unwrap();
     } else {
         launch();
         load();
@@ -206,27 +249,19 @@ fn harbour() {
     }
 }
 fn help() {
-    println!("help");
+    println!("Help!");
 }
 fn start() {
-    println!("start");
+    println!("Start!");
 }
-fn test() {
-    let res = Tmux::cmd(&TMUX(), &["ls", "-F", "#S"]);
-    let sess = TMUX().new_session();
-    println!("sess: {}", sess);
-    println!("2:\n   {}", res);
-    let var = Os::get_env(TMUX_VAR).unwrap();
-    println!("tmux: {}", var);
-}
+fn test() {}
 
-fn fallback() {
-    println!("fallback");
+fn fallback(args: Vec<String>) {
+    println!("[{}] is not a recognized command!\n  Help:", args[1]);
     help();
 }
 
 fn main() {
-    println!("{}", BINARY());
     let args: Vec<String> = env::args().collect();
     let cmd_name = &args[1];
 
@@ -236,6 +271,6 @@ fn main() {
         Some(Cmd::Start) => start(),
         Some(Cmd::Test) => test(),
         Some(Cmd::Hidden) => hidden_funcs(),
-        None => fallback(),
+        None => fallback(args),
     }
 }
