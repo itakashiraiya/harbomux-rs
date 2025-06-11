@@ -1,4 +1,7 @@
+use ctor::ctor;
+use home::home_dir;
 use once_cell::sync::Lazy;
+use std::path;
 use std::process::{Command, ExitStatus};
 use std::{
     env, fmt,
@@ -9,13 +12,50 @@ const HARB_VAR: &str = "HARBOMUX";
 const TMUX_VAR: &str = "TMUX";
 const HARB: Lazy<Tmux> = Lazy::new(|| Tmux::new().set_server("harbonizer").unwrap());
 const TMUX: Lazy<Tmux> = Lazy::new(|| Tmux::new());
-const BINARY: Lazy<String> = Lazy::new(|| {
-    env::current_exe()
-        .expect("???")
-        .to_str()
-        .expect("???")
-        .to_string()
-});
+const BINARY: Lazy<String> =
+    Lazy::new(|| env::current_exe().unwrap().to_str().unwrap().to_string());
+
+enum Shell {
+    Harbomux,
+    Tmux,
+    Default,
+}
+
+impl Clone for Shell {
+    fn clone(&self) -> Self {
+        match &self {
+            Shell::Harbomux => Shell::Harbomux,
+            Shell::Tmux => Shell::Tmux,
+            Shell::Default => Shell::Default,
+        }
+    }
+}
+
+impl Copy for Shell {}
+
+fn current_shell() -> Shell {
+    static SHELL: Lazy<Shell> = Lazy::new(|| {
+        if Os::has_env(HARB_VAR) {
+            Shell::Harbomux
+        } else if Os::has_env(TMUX_VAR) {
+            Shell::Tmux
+        } else {
+            Shell::Default
+        }
+    });
+    *SHELL
+}
+
+fn in_session_dir() -> bool {
+    static VAL: Lazy<bool> = Lazy::new(|| std::path::Path::new(".harbomux").exists());
+    *VAL
+}
+
+#[ctor]
+fn __() {
+    current_shell();
+    in_session_dir();
+}
 
 enum Cmd {
     Harbour,
@@ -80,7 +120,6 @@ impl Os {
         env::var(str).ok()
     }
 
-    #[allow(dead_code)]
     fn set_env(key: &str, val: &str) {
         unsafe {
             env::set_var(key, val);
@@ -201,14 +240,7 @@ fn echo(str: &str) {
 }
 
 fn setup() {
-    if Os::get_env(HARB_VAR).as_deref() != Some("pre-setup") {
-        println!("Cant run setup here!");
-        return;
-    }
-    let env_vars = HARB
-        .cmd_ret("show-env | sed \"/^-/d\" | sed \"s/^/export /\"")
-        .unwrap();
-    println!("env_vars:\n{}", env_vars);
+    println!("setup session...")
     //run startup code
 }
 
@@ -222,15 +254,24 @@ fn hidden_funcs() {
 
 fn launch() {
     println!("TODO: launching...");
-    let _ = HARB.new_sess_cmd(
-        &("-e ".to_string() + &HARB_VAR + "=pre-setup \"" + &BINARY + " --hidden setup; bash\""),
+    let config_path_buf = home_dir()
+        .unwrap()
+        .join(".config")
+        .join(HARB_VAR.to_lowercase());
+    let source_config = if config_path_buf.exists() {
+        format!("source {}; ", config_path_buf.to_str().unwrap())
+    } else {
+        String::new()
+    };
+    let cmd = format!(
+        "{}tmux {}new-session -e {}=1",
+        source_config,
+        HARB.prefix(),
+        HARB_VAR
     );
+    Os::cmd_spawn(&["sh", "-c", &cmd]).unwrap();
     //launch tmux with env var HARBOMUX set to "pre-setup" with cmd to run binary with "--hidden
     //setup" args
-}
-
-fn load() {
-    println!("TODO? load..")
 }
 
 fn harbour() {
@@ -244,7 +285,6 @@ fn harbour() {
         HARB.cmd_spawn("attach").unwrap();
     } else {
         launch();
-        load();
         println!("not in tmux")
     }
 }
@@ -254,7 +294,9 @@ fn help() {
 fn start() {
     println!("Start!");
 }
-fn test() {}
+fn test() {
+    println!("in harb dir: {}", in_session_dir())
+}
 
 fn fallback(args: Vec<String>) {
     println!("[{}] is not a recognized command!\n  Help:", args[1]);
